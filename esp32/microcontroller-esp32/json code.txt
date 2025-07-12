@@ -1,0 +1,5 @@
+{//json code
+  "symbol": "AAPL",
+  "price": 195.50,
+  "currency": "USD"
+}

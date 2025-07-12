@@ -1,0 +1,97 @@
+from flask import Flask, request, jsonify
+import yfinance as yf
+from sklearn.linear_model import LinearRegression
+import numpy as np
+import json
+import paho.mqtt.client as mqtt
+import threading
+
+app = Flask(__name__)
+
+MQTT_BROKER = "broker.hivemq.com"
+MQTT_PORT = 1883
+MQTT_REQUEST_TOPIC = "stocks/request"
+MQTT_RESPONSE_TOPIC_PREFIX = "stocks/response/"
+
+# Core prediction logic
+def fetch_prediction(symbol):
+    try:
+        data = yf.download(symbol, period='1mo', interval='1d')
+        if data.empty or 'Close' not in data.columns:
+            return {
+                "symbol": symbol.upper(),
+                "current_price": 0.0,
+                "predicted_price": 0.0,
+                "predicted_profit": 0.0
+            }
+
+        data = data.reset_index()
+        data['Index'] = np.arange(len(data))
+
+        X = data['Index'].values.reshape(-1, 1)
+        y = data['Close'].values.reshape(-1, 1)
+
+        model = LinearRegression().fit(X, y)
+        next_day = np.array([[len(data)]])
+        predicted_price = model.predict(next_day)[0][0]
+        current_price = float(y[-1][0])
+        predicted_profit = ((predicted_price - current_price) / current_price) * 100
+
+        return {
+            "symbol": symbol.upper(),
+            "current_price": round(current_price, 2),
+            "predicted_price": round(predicted_price, 2),
+            "predicted_profit": round(predicted_profit, 2)
+        }
+
+    except Exception as e:
+        return {
+            "symbol": symbol.upper(),
+            "current_price": 0.0,
+            "predicted_price": 0.0,
+            "predicted_profit": 0.0,
+            "error": str(e)
+        }
+
+# MQTT Callbacks
+def on_connect(client, userdata, flags, rc):
+    print("[MQTT] Connected with result code", rc)
+    client.subscribe(MQTT_REQUEST_TOPIC)
+
+def on_message(client, userdata, msg):
+    try:
+        payload = json.loads(msg.payload.decode())
+        symbol = payload.get("symbol", "").upper()
+        if symbol:
+            print(f"[MQTT] Received request for {symbol}")
+            result = fetch_prediction(symbol)
+            response_topic = MQTT_RESPONSE_TOPIC_PREFIX + symbol
+            client.publish(response_topic, json.dumps(result))
+            print(f"[MQTT] Published prediction to {response_topic}")
+    except Exception as e:
+        print(f"[ERROR] Failed to handle message: {e}")
+
+def start_mqtt():
+    client = mqtt.Client()
+    client.on_connect = on_connect
+    client.on_message = on_message
+    client.connect(MQTT_BROKER, MQTT_PORT, 60)
+    client.loop_start()
+
+# Start MQTT in background thread
+mqtt_thread = threading.Thread(target=start_mqtt)
+mqtt_thread.daemon = True
+mqtt_thread.start()
+
+# Optional HTTP route for testing
+@app.route('/predict')
+def predict():
+    symbol = request.args.get('symbol')
+    if not symbol:
+        return jsonify({"error": "Missing symbol parameter"}), 400
+    result = fetch_prediction(symbol)
+    return jsonify(result)
+
+if __name__ == '__main__':
+    app.run(host='0.0.0.0', port=5000)
+
